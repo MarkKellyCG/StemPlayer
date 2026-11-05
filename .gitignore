@@ -1,0 +1,6 @@
+build/
+test_tmp/
+venv/
+__pycache__/
+*.pyc
+*.vst3/

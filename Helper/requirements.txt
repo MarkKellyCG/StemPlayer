@@ -1,0 +1,16 @@
+# Manual install (the Windows installer does this for you).
+# Install in this order, in a Python 3.10-3.12 virtual environment:
+#   pip install -r Helper/requirements.txt
+#   pip install --no-deps dora-search julius==0.2.7 openunmix==1.3.0 demucs==4.0.1
+torch>=2.1,<2.6
+torchaudio>=2.1,<2.6
+numpy
+scipy
+soundfile
+omegaconf
+einops
+pyyaml
+tqdm
+retrying
+submitit
+treetable

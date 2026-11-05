@@ -1,0 +1,62 @@
+name: Build StemPlayer
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-vst3:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (downloads JUCE 8.0.4)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSTEMPLAYER_BUILD_TESTS=OFF
+
+      - name: Build VST3 (Release, x64)
+        run: cmake --build build --config Release --target StemPlayer_VST3 --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Recurse build/StemPlayer_artefacts/Release/VST3/StemPlayer.vst3 dist/
+          Copy-Item -Recurse Helper dist/Helper
+          Copy-Item README.md dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StemPlayer-win64
+          path: dist
+
+  linux-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries for JUCE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
+
+      - name: Python test deps (no PyTorch needed)
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install numpy scipy soundfile
+
+      - name: Helper unit tests
+        run: venv/bin/python Tests/test_helper.py
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target StemPlayerTests --parallel
+
+      - name: Plugin tests (includes a real helper run using the fake model)
+        env:
+          STEMPLAYER_TEST_HELPER: ${{ github.workspace }}/Helper/stemsplit.py
+          STEMPLAYER_PYTHON: ${{ github.workspace }}/venv/bin/python
+          STEMPLAYER_HELPER_ARGS: "--model fake"
+        run: ./build/StemPlayerTests_artefacts/Release/StemPlayerTests
