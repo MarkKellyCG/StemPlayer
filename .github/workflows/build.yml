@@ -11,11 +11,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No -G/-A: let CMake choose whichever Visual Studio the runner image has (64-bit on a 64-bit host).
+      # On failure the tail of the output is published as an annotation (visible without logging in).
       - name: Configure (downloads JUCE 8.0.4)
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSTEMPLAYER_BUILD_TESTS=OFF
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DSTEMPLAYER_BUILD_TESTS=OFF 2>&1 | Tee-Object -FilePath cfg.log
+          if ($LASTEXITCODE -ne 0) {
+            $gens = (cmake --help | Select-String 'Visual Studio') -join '%0A'
+            $tail = (Get-Content cfg.log -Tail 30) -join '%0A'
+            Write-Host "::error title=CMake configure failed::$tail%0A--- generators:%0A$gens"
+            exit 1
+          }
 
       - name: Build VST3 (Release, x64)
-        run: cmake --build build --config Release --target StemPlayer_VST3 --parallel
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target StemPlayer_VST3 --parallel 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) {
+            $errs = (Select-String -Path build.log -Pattern 'error' | Select-Object -First 15 | ForEach-Object { $_.Line }) -join '%0A'
+            Write-Host "::error title=Windows build failed::$errs"
+            exit 1
+          }
 
       - name: Package
         shell: pwsh
