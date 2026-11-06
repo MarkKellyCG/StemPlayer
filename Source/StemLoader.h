@@ -25,6 +25,13 @@ namespace stemplayer
     void resampleChannel (const float* in, juce::int64 inLen, float* out, juce::int64 outLen,
                           double srcRate, double dstRate);
 
+    /** How much RAM a loaded stem set may use: 25% of physical RAM, at most 8 GB.
+        Override with the STEMPLAYER_MAX_STEM_MB environment variable (used by the tests). */
+    double maxStemMemoryBytes();
+
+    /** Bytes needed to hold `seconds` of six stereo float stems at `rate`. */
+    double stemSetBytes (double seconds, double rate, int numStems = 6);
+
     /** True if `folder` holds at least one recognised stem file. */
     bool folderHasStems (const juce::File& folder);
 }

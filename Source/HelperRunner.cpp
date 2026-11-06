@@ -1,4 +1,5 @@
 #include "HelperRunner.h"
+#include "Log.h"
 #include <deque>
 
 namespace stemplayer::helper
@@ -83,6 +84,7 @@ namespace stemplayer::helper
     {
         RunResult res;
         juce::ChildProcess proc;
+        log::write ("helper start: " + command.joinIntoString (" "));
 
         struct Unpublish
         {
@@ -116,10 +118,12 @@ namespace stemplayer::helper
             const auto text = line.fromFirstOccurrenceOf (" ", false, false).trim();
 
             if (kind == "HB")                       { onMessage ("HB", {}); return; }
-            if (kind == "STATUS" || kind == "PROGRESS") { onMessage (kind, text); return; }
-            if (kind == "ERROR")                    { lastError = text; onMessage (kind, text); return; }
-            if (kind == "DONE")                     { sawDone = true; onMessage (kind, text); return; }
+            if (kind == "STATUS")                   { log::write ("helper: " + text); onMessage (kind, text); return; }
+            if (kind == "PROGRESS")                 { onMessage (kind, text); return; }
+            if (kind == "ERROR")                    { lastError = text; log::write ("helper ERROR: " + text); onMessage (kind, text); return; }
+            if (kind == "DONE")                     { sawDone = true; log::write ("helper DONE: " + text); onMessage (kind, text); return; }
 
+            log::write ("helper output: " + line);
             tail.push_back (line);                  // anything else (e.g. a Python traceback)
             if (tail.size() > 8) tail.pop_front();
         };
@@ -128,6 +132,7 @@ namespace stemplayer::helper
         {
             if (shouldCancel && shouldCancel())
             {
+                log::write ("helper cancelled");
                 proc.kill();
                 proc.waitForProcessToFinish (3000);   // also reaps the child so it doesn't linger as a zombie
                 res.cancelled = true;
@@ -177,6 +182,7 @@ namespace stemplayer::helper
 
         const auto exitCode = proc.getExitCode();
         res.ok = (exitCode == 0 && sawDone);
+        log::write ("helper exit code " + juce::String ((int) exitCode) + (res.ok ? " (ok)" : " (FAILED)"));
 
         if (! res.ok)
         {

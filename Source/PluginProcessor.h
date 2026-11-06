@@ -24,7 +24,7 @@ public:
 
     // --- AudioProcessor ---------------------------------------------------------------
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override {}
+    void releaseResources() override;
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
@@ -62,6 +62,10 @@ public:
 
     float getMeter (int stem) const { return meters[(size_t) stem].load(); }
 
+    /** Writes the audio-thread counters (blocks, seeks, ...) to the log. Message thread only. */
+    void logAudioStats (const char* why);
+    juce::File getLogFile() const;
+
     // --- test / tooling hooks ---------------------------------------------------------
     /** Synchronously load a folder at `rate` and publish it. */
     bool loadFolderBlocking (const juce::File& folder, double rate, juce::String& error);
@@ -97,6 +101,12 @@ private:
     std::atomic<double> loadedRate { 0.0 };
     std::array<std::atomic<float>, stemplayer::kNumStems> meters {};
     juce::int64 fallbackPos = 0;
+
+    // audio-thread diagnostics (relaxed atomics; read by logAudioStats)
+    std::atomic<juce::uint64> statBlocks { 0 }, statPlayStarts { 0 }, statSeeks { 0 }, statNoStemsWhilePlaying { 0 };
+    std::atomic<int> statMaxBlock { 0 };
+    bool wasPlaying = false;
+    juce::int64 expectedPos = 0;
 
     // ownership of loaded stems (never touched from the audio thread)
     juce::CriticalSection setLock;

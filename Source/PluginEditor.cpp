@@ -85,7 +85,7 @@ StemPlayerEditor::StemPlayerEditor (StemPlayerProcessor& p)
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     addAndMakeVisible (statusLabel);
 
-    for (auto* b : { &splitButton, &loadButton, &helperButton, &cancelButton })
+    for (auto* b : { &splitButton, &loadButton, &helperButton, &logButton, &cancelButton })
         addAndMakeVisible (b);
 
     addAndMakeVisible (progressBar);
@@ -146,6 +146,14 @@ StemPlayerEditor::StemPlayerEditor (StemPlayerProcessor& p)
                               });
     };
 
+    logButton.setTooltip ("Show the StemPlayer log file (%APPDATA%\\StemPlayer\\StemPlayer.log)");
+    logButton.onClick = [this]
+    {
+        auto f = proc.getLogFile();
+        if (! f.existsAsFile()) f.create();
+        f.revealToUser();
+    };
+
     cancelButton.onClick = [this] { proc.cancelJob(); };
 
     setSize (760, 470);          // last: triggers resized(), which needs every child to exist
@@ -178,6 +186,8 @@ void StemPlayerEditor::resized()
     loadButton.setBounds (buttons.removeFromLeft (160));
     buttons.removeFromLeft (6);
     helperButton.setBounds (buttons.removeFromLeft (80));
+    buttons.removeFromLeft (6);
+    logButton.setBounds (buttons.removeFromLeft (50));
     cancelButton.setBounds (buttons.removeFromRight (80));
     top.removeFromTop (4);
     auto statusRow = top;
@@ -203,6 +213,12 @@ void StemPlayerEditor::resized()
 
 void StemPlayerEditor::timerCallback()
 {
+    if (++statsTick >= 30 * 15)             // every ~15 s while the window is open
+    {
+        statsTick = 0;
+        proc.logAudioStats ("periodic");
+    }
+
     for (int i = 0; i < kNumStems; ++i)
     {
         strips[(size_t) i]->setMeter (proc.getMeter (i));

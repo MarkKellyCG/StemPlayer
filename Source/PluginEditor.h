@@ -46,11 +46,12 @@ private:
 
     juce::Label titleLabel, statusLabel, offsetLabel, masterLabel;
     juce::TextButton splitButton { "Split audio file..." }, loadButton { "Load stems folder..." },
-                     helperButton { "Helper..." }, cancelButton { "Cancel" };
+                     helperButton { "Helper..." }, logButton { "Log" }, cancelButton { "Cancel" };
     juce::Slider offsetSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  masterSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::AudioProcessorValueTreeState::SliderAttachment offsetAtt, masterAtt;
 
+    int statsTick = 0;
     double progressValue = 0.0;
     juce::ProgressBar progressBar { progressValue };
 

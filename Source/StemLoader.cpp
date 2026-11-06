@@ -1,4 +1,5 @@
 #include "StemLoader.h"
+#include "Log.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <atomic>
 #include <thread>
@@ -15,6 +16,21 @@ namespace stemplayer
                 return f;
         }
         return {};
+    }
+
+    double maxStemMemoryBytes()
+    {
+        const auto env = juce::SystemStats::getEnvironmentVariable ("STEMPLAYER_MAX_STEM_MB", {});
+        if (env.getDoubleValue() > 0.0)
+            return env.getDoubleValue() * 1048576.0;
+
+        const double physical = (double) juce::SystemStats::getMemorySizeInMegabytes() * 1048576.0;
+        return std::min (8.0e9, 0.25 * physical);
+    }
+
+    double stemSetBytes (double seconds, double rate, int numStems)
+    {
+        return seconds * rate * 2.0 * 4.0 * (double) numStems;
     }
 
     bool folderHasStems (const juce::File& folder)
@@ -86,11 +102,37 @@ namespace stemplayer
             return result;
         }
 
+        // ---- size check before decoding anything (fail fast, no wasted work) ---------------
+        {
+            double finalBytes = 0.0, largestDecoded = 0.0, maxSeconds = 0.0;
+            for (int i = 0; i < kNumStems; ++i)
+            {
+                if (! files[(size_t) i].existsAsFile()) continue;
+                std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (files[(size_t) i]));
+                if (r == nullptr || r->sampleRate <= 0.0) continue;
+                const double seconds = (double) r->lengthInSamples / r->sampleRate;
+                maxSeconds = std::max (maxSeconds, seconds);
+                finalBytes += stemSetBytes (seconds, targetRate > 0.0 ? targetRate : r->sampleRate, 1);
+                largestDecoded = std::max (largestDecoded, (double) r->lengthInSamples * 8.0);
+            }
+
+            const double limit = maxStemMemoryBytes();
+            if (finalBytes + largestDecoded > limit)
+            {
+                const double perMinute = stemSetBytes (60.0, targetRate > 0.0 ? targetRate : 44100.0, found);
+                result.error = "These stems are " + juce::String ((int) std::round (maxSeconds / 60.0))
+                             + " min long and need about " + juce::String ((finalBytes + largestDecoded) / 1.0e9, 1)
+                             + " GB of RAM; the limit here is " + juce::String (limit / 1.0e9, 1) + " GB (about "
+                             + juce::String ((int) (limit / perMinute)) + " min). Use a shorter file.";
+                stemplayer::log::write ("loader refused: " + result.error);
+                return result;
+            }
+        }
+
         // ---- decode -------------------------------------------------------------------
         juce::int64 maxLen = 0;
         double firstRate = 0.0;
         int done = 0;
-        double estimatedBytes = 0.0;
 
         for (int i = 0; i < kNumStems; ++i)
         {
@@ -111,14 +153,7 @@ namespace stemplayer
                 return result;
             }
 
-            estimatedBytes += (double) reader->lengthInSamples * 2.0 * 4.0 * 2.0; // decoded + resampled worst case
-            if (estimatedBytes > 7.0e9)
-            {
-                result.error = "Stems are too long to hold in memory (" + juce::String (estimatedBytes / 1.0e9, 1) + " GB)";
-                return result;
-            }
-
-            const int len = (int) reader->lengthInSamples;
+        const int len = (int) reader->lengthInSamples;
             d.buf.setSize (2, len);
             d.buf.clear();
             d.rate = reader->sampleRate;
@@ -228,6 +263,8 @@ namespace stemplayer
         }
 
         report (1.0f);
+        stemplayer::log::write ("loaded " + juce::String (found) + " stems from " + folder.getFullPathName() + " at "
+                                + juce::String (targetRate) + " Hz, " + juce::String ((double) maxLen / targetRate, 1) + " s");
         result.set = std::move (set);
         return result;
     }

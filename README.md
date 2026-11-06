@@ -45,14 +45,29 @@ weakest part of the model, so expect more bleed there.
 3. Stems are saved next to the source as `<song>_stems/` (or in `%APPDATA%\StemPlayer\stems` if that folder isn't
    writable). Splitting the same file again reuses them if they are newer than the source - delete the
    folder to force a re-split.
-4. Press play. The plugin follows the host transport, including loops and locates. Use **Stem offset** if
+4. **The six stems always add back up to your original.** Demucs's own stems don't (the part the model can't explain is
+   simply dropped, which makes the stems played together sound thinner and duller). The helper adds that remainder
+   to **Other**, so the Mix is the original track. Stems made by the first helper version are re-split automatically.
+   (`--no-preserve-mix` turns this off.)
+5. Press play. The plugin follows the host transport, including loops and locates. Use **Stem offset** if
    your audio doesn't start at 0.
-5. Already have stems? **Load stems folder...** accepts any folder containing some or all of
+6. Already have stems? **Load stems folder...** accepts any folder containing some or all of
    `drums/bass/other/vocals/guitar/piano` as `.wav` or `.flac`. Mono files are duplicated to stereo, and
    any sample rate is resampled to the host rate (windowed sinc).
 
 The project saves the stems **folder path**, not the audio, so keep the folder alongside the project. If the
 host's sample rate changes, the stems are reloaded and resampled automatically.
+
+## Troubleshooting: the log
+Everything the plugin does is written to `%APPDATA%\StemPlayer\StemPlayer.log` (the **Log** button reveals it): host
+sample rate/block size, every split and load with timings, the helper's exact command line and exit code, cancels,
+and why a saved state was ignored. Counters (blocks, play starts, seeks, "playing with no stems") are logged every
+~15 s while the window is open and when the plugin is released. Attach this file when reporting a problem.
+
+- **Files too long for RAM** (e.g. a 2-hour DJ mix needs ~14 GB) are refused *before* the split with the size and limit
+  (25% of RAM, max 8 GB), instead of wasting GPU time and then failing to load.
+- A host replaying an **older saved state** (undo, project load) never cancels a running split or swaps back to a song
+  you have already replaced; the log says why it was ignored.
 
 ## Helper on its own
 
@@ -87,9 +102,10 @@ python Tests/test_helper.py        # helper tests, no PyTorch required
 Use `-DSTEMPLAYER_JUCE_DIR=/path/to/JUCE` to build against a local checkout.
 
 ### What has been verified, and what hasn't
-- **Verified (Linux, headless) - 138 checks, repeatable:** the resampler (alignment and level at several rate pairs), the
+- **Verified (Linux, headless) - 157 checks, repeatable:** the resampler (alignment and level at several rate pairs), the
   loader, transport-synced playback, multi-out routing, Mix == sum of stems, mute/solo/gain/master, offset, seeking,
-  state restore, sample-rate change, the editor lifecycle (construct, resize, paint, destroy), and the helper job (live
+  state restore (incl. never cancelling a job / reverting stems), the RAM guard, reuse of existing stems by manifest
+  version, the log file, sample-rate change, the editor lifecycle (construct, resize, paint, destroy), and the helper job (live
   status, failure reporting, cancel kills and reaps the child), including a real run of `stemsplit.py` with the fake model.
 - **Verified with `pluginval` (strictness 10, GUI tests on, VST3 on Linux):** passes, including Steinberg's VST3 validator,
   editor open/automation/open-while-processing, parameter thread safety, state restoration and parameter fuzzing, with all 7

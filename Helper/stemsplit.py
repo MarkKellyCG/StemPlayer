@@ -126,6 +126,20 @@ def separate_chunked(apply_fn, wav, chunk, overlap, on_progress=None):
     return out
 
 
+def add_residual(y, x, names, target="other"):
+    """
+    Demucs stems do not sum back to the input: the unexplained part (the model's error) is simply
+    dropped, which makes the stems played together sound thinner / duller than the original.
+    Add that remainder (x - sum(stems)) to the `target` stem so that sum(stems) == x exactly.
+    y: (S, C, n) stems, x: (C, m) reference at the SAME sample rate (n and m may differ by a sample
+    or two after resampling; the overlap is used).  Modifies y in place and returns it.
+    """
+    L = min(y.shape[2], x.shape[1])
+    idx = names.index(target) if target in names else len(names) - 1
+    y[idx, :, :L] += x[:, :L] - y[:, :, :L].sum(axis=0)
+    return y
+
+
 # --------------------------------------------------------------------------
 # separation back-ends
 # --------------------------------------------------------------------------
@@ -209,6 +223,8 @@ def main(argv=None):
     ap.add_argument("--format", default="wav", choices=["wav", "flac"])
     ap.add_argument("--bit-depth", type=int, default=24, choices=[16, 24, 32])
     ap.add_argument("--output-rate", default="original", choices=["original", "model"])
+    ap.add_argument("--no-preserve-mix", action="store_true",
+                    help="don't add the unexplained remainder to 'other' (stems then do NOT sum to the original)")
     ap.add_argument("--progress", action="store_true", help="accepted for compatibility; progress is always printed")
     args = ap.parse_args(argv)
     if not args.download_model and not (args.input and args.output):
@@ -272,6 +288,7 @@ def main(argv=None):
 
         y = separate_chunked(fn, xn, chunk, ovl, prog)
         y = y * std + mean                                  # (S, C, n)
+        preserve = not args.no_preserve_mix
 
         sr_out = sr_in if args.output_rate == "original" else sr_model
         emit("STATUS", "Writing stems")
@@ -281,6 +298,13 @@ def main(argv=None):
             if sr_out != sr_model:
                 s = resample(s, sr_model, sr_out)
             stems.append(s)
+
+        if preserve:
+            ref = wav if sr_out == sr_in else x             # reference at the output rate
+            ystack = np.stack(stems)
+            del stems, y
+            ystack = add_residual(ystack, ref, names)       # stems now sum exactly to the input
+            stems = [ystack[i] for i in range(ystack.shape[0])]
 
         peak = max(float(np.max(np.abs(s))) for s in stems)
         gain = 1.0
@@ -301,6 +325,7 @@ def main(argv=None):
             json.dump({"source": os.path.basename(args.input), "model": args.model,
                        "sample_rate": sr_out, "format": ext, "bit_depth": args.bit_depth,
                        "gain_applied": gain, "stems": names,
+                       "format_version": 2, "preserve_mix": preserve,
                        "seconds": round(time.time() - _t0, 1)}, f, indent=2)
         emit("PROGRESS", "1.0")
         emit("DONE", args.output)

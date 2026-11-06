@@ -45,5 +45,26 @@ def test_resample_tone():
     print("resample tone OK (peak %.1f Hz, %d samples)" % (f, y.shape[1]))
 
 
+def test_residual_makes_stems_sum_to_input():
+    rnd = np.random.default_rng(3)
+    names = list(ss.STEMS)
+    x = rnd.standard_normal((2, 30000)).astype("float32") * 0.3
+    fn, _ = ss.fake_apply_factory(44100)                    # band split: sum of bands != x
+    y = ss.separate_chunked(fn, x, 12000, 1000)
+    before = float(np.max(np.abs(y.sum(axis=0) - x)))
+    assert before > 1e-3, "test premise: stems should NOT sum to the input yet (err %g)" % before
+    y2 = ss.add_residual(y.copy(), x, names)
+    after = float(np.max(np.abs(y2.sum(axis=0) - x)))
+    assert after < 1e-5, after
+    # only 'other' changed
+    for i, n in enumerate(names):
+        if n != "other":
+            assert np.array_equal(y2[i], y[i]), n + " must be untouched"
+    # unknown target falls back to the last stem instead of crashing
+    y3 = ss.add_residual(y.copy(), x, ["a", "b", "c", "d", "e", "f"], target="zzz")
+    assert float(np.max(np.abs(y3.sum(axis=0) - x))) < 1e-5
+    print("residual restores exact sum OK (error %.3g -> %.3g)" % (before, after))
+
+
 if __name__ == "__main__":
-    test_plan_chunks(); test_crossfade_reconstructs(); test_resample_tone()
+    test_plan_chunks(); test_crossfade_reconstructs(); test_resample_tone(); test_residual_makes_stems_sum_to_input()

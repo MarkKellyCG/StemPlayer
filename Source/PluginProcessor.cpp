@@ -2,6 +2,9 @@
 #include "PluginEditor.h"
 #include "StemLoader.h"
 #include "HelperRunner.h"
+#include "StemLoader.h"
+#include "Log.h"
+#include <juce_audio_formats/juce_audio_formats.h>
 
 using namespace stemplayer;
 
@@ -33,11 +36,20 @@ namespace
         return helper::defaultHelperDirectory().getChildFile ("stems").getChildFile (name);
     }
 
+    /** Reusable only if the stems are newer than the source AND were written by a helper that keeps the
+        mix exact (format_version >= 2).  Stems from the first helper version are re-split. */
     bool hasCompleteStems (const juce::File& dir, const juce::File& source)
     {
         auto manifest = dir.getChildFile ("stems.json");
         if (! manifest.existsAsFile() || manifest.getLastModificationTime() < source.getLastModificationTime())
             return false;
+
+        const auto json = juce::JSON::parse (manifest);
+        if (! json.isObject() || (int) json.getProperty ("format_version", 0) < 2)
+        {
+            stemplayer::log::write ("existing stems in " + dir.getFullPathName() + " are from an older helper: re-splitting");
+            return false;
+        }
         return folderHasStems (dir);
     }
 }
@@ -98,10 +110,14 @@ StemPlayerProcessor::StemPlayerProcessor()
     }
     masterP = apvts.getRawParameterValue ("master");
     offsetP = apvts.getRawParameterValue ("offset");
+    stemplayer::log::write ("instance created " + juce::String::toHexString ((juce::pointer_sized_int) this)
+                            + " (host: " + juce::PluginHostType().getHostDescription() + ")");
 }
 
 StemPlayerProcessor::~StemPlayerProcessor()
 {
+    logAudioStats ("destroying");
+    stemplayer::log::write ("instance destroyed " + juce::String::toHexString ((juce::pointer_sized_int) this));
     cancelJob();
     {
         const juce::ScopedLock sl (jobLock);
@@ -123,8 +139,30 @@ bool StemPlayerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) co
     return true;
 }
 
-void StemPlayerProcessor::prepareToPlay (double sampleRate, int)
+void StemPlayerProcessor::releaseResources()
 {
+    logAudioStats ("releaseResources");
+}
+
+juce::File StemPlayerProcessor::getLogFile() const { return stemplayer::log::file(); }
+
+void StemPlayerProcessor::logAudioStats (const char* why)
+{
+    stemplayer::log::write (juce::String ("audio stats (") + why + "): blocks=" + juce::String ((juce::int64) statBlocks.load())
+                            + " playStarts=" + juce::String ((juce::int64) statPlayStarts.load())
+                            + " seeks=" + juce::String ((juce::int64) statSeeks.load())
+                            + " playingWithNoStems=" + juce::String ((juce::int64) statNoStemsWhilePlaying.load())
+                            + " maxBlock=" + juce::String (statMaxBlock.load()));
+}
+
+void StemPlayerProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    int enabled = 0;
+    for (int i = 0; i < getBusCount (false); ++i)
+        if (getBus (false, i)->isEnabled()) ++enabled;
+    stemplayer::log::write ("prepareToPlay rate=" + juce::String (sampleRate) + " block=" + juce::String (samplesPerBlock)
+                            + " enabledOutputBuses=" + juce::String (enabled)
+                            + " loadedRate=" + juce::String (loadedRate.load()) + " status=" + getStatus().text);
     hostRate.store (sampleRate);
 
     for (int i = 0; i < kNumStems; ++i)
@@ -180,6 +218,19 @@ void StemPlayerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     }
     if (! playing)
         fallbackPos = 0;
+
+    // diagnostics (lock-free): how often does the host seek, how big are its blocks
+    statBlocks.fetch_add (1, std::memory_order_relaxed);
+    if (numSamples > statMaxBlock.load (std::memory_order_relaxed))
+        statMaxBlock.store (numSamples, std::memory_order_relaxed);
+    if (playing)
+    {
+        if (! wasPlaying)                   statPlayStarts.fetch_add (1, std::memory_order_relaxed);
+        else if (hostPos != expectedPos)    statSeeks.fetch_add (1, std::memory_order_relaxed);
+        if (set == nullptr)                 statNoStemsWhilePlaying.fetch_add (1, std::memory_order_relaxed);
+        expectedPos = hostPos + numSamples;
+    }
+    wasPlaying = playing;
 
     const juce::int64 readPos = hostPos - (juce::int64) std::llround ((double) offsetP->load() * sr);
 
@@ -258,6 +309,9 @@ void StemPlayerProcessor::installSet (std::shared_ptr<StemSet> newSet)
         if (newSet->present[(size_t) i]) mask |= (1u << i);
 
     const auto c0 = blockCount.load();
+    stemplayer::log::write ("publishing stems '" + newSet->title + "' (" + juce::String ((double) newSet->length / newSet->sampleRate, 1)
+                            + " s @ " + juce::String (newSet->sampleRate) + " Hz, mask " + juce::String::toHexString ((int) mask)
+                            + (old != nullptr ? "" : ", replacing nothing") + ")");
     {
         const juce::ScopedLock sl (setLock);
         old = std::move (ownedSet);
@@ -348,6 +402,8 @@ void StemPlayerProcessor::startJob (std::function<void (juce::Thread&)> fn)
 
 void StemPlayerProcessor::cancelJob()
 {
+    if (getStatus().busy())
+        stemplayer::log::write ("cancelJob while busy: " + getStatus().text);
     const juce::ScopedLock sl (jobLock);
     if (job != nullptr)
     {
@@ -362,6 +418,7 @@ void StemPlayerProcessor::cancelJob()
 
 void StemPlayerProcessor::requestLoadFolder (const juce::File& folder)
 {
+    stemplayer::log::write ("requestLoadFolder (user): " + folder.getFullPathName());
     if (getStatus().busy())
         cancelJob();                              // an explicit user request replaces whatever is running
 
@@ -383,8 +440,11 @@ void StemPlayerProcessor::startLoadIfNeeded()
     if (folder == juce::File() || rate <= 0.0)
         return;                                   // will be retried from prepareToPlay
 
-    if (getStatus().state == JobState::Splitting)
+    if (getStatus().busy())
+    {
+        stemplayer::log::write ("startLoadIfNeeded: a job is running, not interrupting it");
         return;                                   // runSplit loads at the then-current host rate when it finishes
+    }
 
     bool haveSameRate = false;
     {
@@ -394,6 +454,8 @@ void StemPlayerProcessor::startLoadIfNeeded()
     if (haveSameRate || std::abs (loadingRate.load() - rate) < 0.5)
         return;
 
+    stemplayer::log::write ("loading " + folder.getFullPathName() + " at " + juce::String (rate) + " Hz (loaded rate was "
+                            + juce::String (loadedRate.load()) + ")");
     loadingRate.store (rate);
     setJobStatus (JobState::Loading, 0.0f, "Loading stems...");     // visible immediately, before the thread runs
     startJob ([this, folder, rate] (juce::Thread& t) { runLoad (t, folder, rate); });
@@ -401,6 +463,7 @@ void StemPlayerProcessor::startLoadIfNeeded()
 
 void StemPlayerProcessor::requestSplit (const juce::File& audio)
 {
+    stemplayer::log::write ("requestSplit (user): " + audio.getFullPathName());
     loadingRate.store (0.0);
     setJobStatus (JobState::Splitting, -1.0f, "Starting...");        // visible immediately, before the thread runs
     startJob ([this, audio] (juce::Thread& t) { runSplit (t, audio); });
@@ -420,6 +483,7 @@ void StemPlayerProcessor::runLoad (juce::Thread& t, juce::File folder, double ra
 
     if (res.set == nullptr)
     {
+        stemplayer::log::write ("load failed: " + res.error);
         if (res.error == "Cancelled") setJobStatus (JobState::Idle, 0.0f, "Cancelled");
         else                          setJobStatus (JobState::Error, 0.0f, res.error);
         return;
@@ -428,6 +492,10 @@ void StemPlayerProcessor::runLoad (juce::Thread& t, juce::File folder, double ra
     const auto name = res.set->title;
     installSet (std::shared_ptr<StemSet> (std::move (res.set)));
     setJobStatus (JobState::Idle, 1.0f, "Loaded: " + name);
+
+    if (std::abs (hostRate.load() - rate) > 0.5 && hostRate.load() > 0.0)
+        stemplayer::log::write ("WARNING: host rate is now " + juce::String (hostRate.load()) + " but stems were prepared for "
+                                + juce::String (rate) + "; they will reload on the next prepareToPlay");
 }
 
 void StemPlayerProcessor::runSplit (juce::Thread& t, juce::File audio)
@@ -446,6 +514,28 @@ void StemPlayerProcessor::runSplit (juce::Thread& t, juce::File audio)
         setJobStatus (JobState::Error, 0.0f,
                       "Splitter helper not found. Install it (see README) or click 'Helper...' and pick stemsplit.py.");
         return;
+    }
+
+    {
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (audio) })
+        {
+            const double seconds = (double) r->lengthInSamples / std::max (1.0, r->sampleRate);
+            const double rate = hostRate.load() > 0.0 ? hostRate.load() : r->sampleRate;
+            const double needed = stemplayer::stemSetBytes (seconds, rate);
+            const double limit = stemplayer::maxStemMemoryBytes();
+            stemplayer::log::write ("split: " + audio.getFullPathName() + " is " + juce::String (seconds / 60.0, 1) + " min, stems need "
+                                    + juce::String (needed / 1.0e9, 2) + " GB (limit " + juce::String (limit / 1.0e9, 1) + " GB)");
+            if (needed > limit)
+            {
+                setJobStatus (JobState::Error, 0.0f,
+                              audio.getFileName() + " is " + juce::String ((int) std::round (seconds / 60.0)) + " min long. Its stems would need "
+                              + juce::String (needed / 1.0e9, 1) + " GB of RAM (limit here " + juce::String (limit / 1.0e9, 1)
+                              + " GB, about " + juce::String ((int) (limit / stemplayer::stemSetBytes (60.0, rate))) + " min). Use a shorter file.");
+                return;
+            }
+        }
     }
 
     const auto outDir = chooseOutputDir (audio);
@@ -489,6 +579,7 @@ void StemPlayerProcessor::runSplit (juce::Thread& t, juce::File audio)
 //==============================================================================
 void StemPlayerProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
+    stemplayer::log::write ("getStateInformation");
     auto state = apvts.copyState();
     {
         const juce::ScopedLock sl (statusLock);
@@ -516,8 +607,34 @@ void StemPlayerProcessor::setStateInformation (const void* data, int size)
             helperFile = juce::File (vt[kPropHelper].toString());
 
         setHelperPath (helperFile);
-        if (folder != juce::File() && folder.isDirectory())
-            requestLoadFolder (folder);
+
+        // Hosts call setStateInformation for undo/redo, project load and duplication. It must never cancel a
+        // running split or swap the stems back to an older song the user has already replaced.
+        juce::String decision;
+        if (folder == juce::File() || ! folder.isDirectory())
+            decision = "no usable folder in state";
+        else if (getStatus().busy())
+            decision = "ignored: a job is running";
+        else
+        {
+            juce::File current;
+            {
+                const juce::ScopedLock sl (setLock);
+                if (ownedSet != nullptr) current = ownedSet->folder;
+            }
+            if (current != juce::File() && current != folder)
+                decision = "ignored: '" + current.getFileName() + "' is already loaded";
+            else
+            {
+                {
+                    const juce::ScopedLock sl (statusLock);
+                    desiredFolder = folder;
+                }
+                decision = current == folder ? "same folder already loaded" : "loading";
+                startLoadIfNeeded();
+            }
+        }
+        stemplayer::log::write ("setStateInformation folder=" + folder.getFullPathName() + " -> " + decision);
     }
 }
 

@@ -9,6 +9,7 @@
 #include <juce_events/juce_events.h>
 #include "../Source/PluginProcessor.h"
 #include "../Source/StemLoader.h"
+#include "../Source/Log.h"
 #include <cstdlib>
 #include <iostream>
 
@@ -536,6 +537,123 @@ static void testEditor (const juce::File& root)
     CHECK (true, "editor lifecycle survived");
 }
 
+static void testSafety (const juce::File& root)
+{
+    std::cout << "[safety: memory guard, state restore, manifest reuse, log]\n";
+    const double sr = 44100.0;
+
+    // ---- memory guard (loader + split pre-check) ----
+    {
+        auto dir = root.getChildFile ("Big_stems"); dir.createDirectory();
+        for (int i = 0; i < kNumStems; ++i)
+            writeWav (dir.getChildFile (juce::String (kStemIds[i]) + ".wav"), sine (100.0 * (i + 1), 0.3, 44100.0, 2.0), nullptr, 44100.0);
+
+        ::setenv ("STEMPLAYER_MAX_STEM_MB", "1", 1);        // 6 x 2 s stereo float needs ~4 MB
+        auto r = loadStemFolder (dir, sr);
+        CHECK (r.set == nullptr && r.error.contains ("RAM"), "loader refuses stems that don't fit: " << r.error);
+
+        StemPlayerProcessor p;
+        p.setRateAndBufferSizeDetails (sr, 512); p.prepareToPlay (sr, 512);
+        auto wav = root.getChildFile ("toolong.wav");
+        writeWav (wav, sine (440, 0.3, 44100, 3.0), nullptr, 44100);
+        auto script = root.getChildFile ("never_run.sh");
+        script.replaceWithText ("#!/bin/sh\necho ERROR helper-should-not-run\nexit 1\n", false, false, "\n");
+        script.setExecutePermission (true);
+        p.setHelperPath (script);
+        p.requestSplit (wav);
+        CHECK (waitFor ([&] { return p.getStatus().state == StemPlayerProcessor::JobState::Error; }, 5000), "split of a too-long file is refused");
+        CHECK (p.getStatus().text.contains ("shorter file"), "message tells the user what to do: " << p.getStatus().text);
+        ::unsetenv ("STEMPLAYER_MAX_STEM_MB");
+    }
+
+    // ---- state restore must not cancel a job or revert stems ----
+    {
+        auto A = root.getChildFile ("A_stems"); A.createDirectory();
+        auto B = root.getChildFile ("B_stems"); B.createDirectory();
+        for (int i = 0; i < kNumStems; ++i)
+        {
+            writeWav (A.getChildFile (juce::String (kStemIds[i]) + ".wav"), sine (200.0, 0.3, 44100.0, 1.0), nullptr, 44100.0);
+            writeWav (B.getChildFile (juce::String (kStemIds[i]) + ".wav"), sine (300.0, 0.3, 44100.0, 1.0), nullptr, 44100.0);
+        }
+
+        StemPlayerProcessor src;                           // makes a state that points at A
+        src.setRateAndBufferSizeDetails (sr, 512); src.prepareToPlay (sr, 512);
+        juce::String e;
+        CHECK (src.loadFolderBlocking (A, sr, e), "load A");
+        juce::MemoryBlock stateA; src.getStateInformation (stateA);
+
+        StemPlayerProcessor p;
+        p.setRateAndBufferSizeDetails (sr, 512); p.prepareToPlay (sr, 512);
+        CHECK (p.loadFolderBlocking (B, sr, e), "load B");
+        p.setStateInformation (stateA.getData(), (int) stateA.getSize());   // host replays an OLDER state (undo)
+        juce::Thread::sleep (300);
+        CHECK (p.getTitle() == "B", "restoring older state must not swap the loaded stems back, title is " << p.getTitle());
+        CHECK (! p.getStatus().busy(), "no job started by ignored state");
+
+        // a running job is not cancelled by a state restore
+        auto slow = root.getChildFile ("slow2.sh");
+        slow.replaceWithText ("#!/bin/sh\necho 'STATUS busy2'\nwhile true; do echo HB; sleep 0.2; done\n", false, false, "\n");
+        slow.setExecutePermission (true);
+        p.setHelperPath (slow);
+        auto wav = root.getChildFile ("in3.wav");
+        writeWav (wav, sine (440, 0.3, 44100, 1.0), nullptr, 44100);
+        p.requestSplit (wav);
+        CHECK (waitFor ([&] { return p.getStatus().text == "busy2"; }, 5000), "slow helper running");
+        p.setStateInformation (stateA.getData(), (int) stateA.getSize());
+        juce::Thread::sleep (300);
+        CHECK (p.getStatus().state == StemPlayerProcessor::JobState::Splitting && p.getStatus().text == "busy2", "state restore did not cancel the running split");
+        p.prepareToPlay (sr, 512);                         // hosts do this constantly
+        juce::Thread::sleep (200);
+        CHECK (p.getStatus().state == StemPlayerProcessor::JobState::Splitting, "prepareToPlay did not cancel the running split");
+        p.cancelJob();
+    }
+
+    // ---- stems from an older helper are re-split; current ones are reused ----
+    {
+        StemPlayerProcessor p;
+        p.setRateAndBufferSizeDetails (sr, 512); p.prepareToPlay (sr, 512);
+        auto fail = root.getChildFile ("fail2.sh");
+        fail.replaceWithText ("#!/bin/sh\necho 'ERROR helper was invoked'\nexit 3\n", false, false, "\n");
+        fail.setExecutePermission (true);
+        p.setHelperPath (fail);
+
+        for (int version : { 0, 2 })
+        {
+            auto d = root.getChildFile ("reuse" + juce::String (version)); d.createDirectory();
+            auto audio = d.getChildFile ("Song.wav");
+            writeWav (audio, sine (440, 0.3, 44100, 1.0), nullptr, 44100);
+            auto out = d.getChildFile ("Song_stems"); out.createDirectory();
+            for (int i = 0; i < kNumStems; ++i)
+                writeWav (out.getChildFile (juce::String (kStemIds[i]) + ".wav"), sine (150.0, 0.3, 44100.0, 1.0), nullptr, 44100.0);
+            juce::Thread::sleep (1100);                    // manifest must be newer than the audio
+            out.getChildFile ("stems.json").replaceWithText (version ? "{\"format_version\": 2, \"preserve_mix\": true}" : "{\"model\": \"htdemucs_6s\"}");
+
+            p.requestSplit (audio);
+            if (version == 2)
+            {
+                CHECK (waitFor ([&] { return p.getStatus().state == StemPlayerProcessor::JobState::Idle && p.getStatus().text.startsWith ("Loaded"); }, 20000),
+                       "current-format stems are reused without running the helper: " << p.getStatus().text);
+            }
+            else
+            {
+                CHECK (waitFor ([&] { return p.getStatus().state == StemPlayerProcessor::JobState::Error; }, 20000), "old-format stems trigger a re-split");
+                CHECK (p.getStatus().text == "helper was invoked", "helper was actually run: " << p.getStatus().text);
+            }
+        }
+    }
+
+    // ---- the log file is written and describes what happened ----
+    {
+        const auto text = stemplayer::log::file().loadFileAsString();
+        CHECK (text.contains ("prepareToPlay"), "log has prepareToPlay");
+        CHECK (text.contains ("requestSplit (user)"), "log has requestSplit");
+        CHECK (text.contains ("setStateInformation"), "log has setStateInformation decisions");
+        CHECK (text.contains ("ignored: 'B' is already loaded") || text.contains ("already loaded"), "log explains an ignored restore");
+        CHECK (text.contains ("loader refused"), "log has the memory refusal");
+        CHECK (text.contains ("helper start:"), "log has the helper command line");
+    }
+}
+
 static void testPerf (const juce::File& root)
 {
     std::cout << "[perf] building 6 x 4 min @44.1k stems...\n";
@@ -565,6 +683,7 @@ int main()
     testPlayback (root);
     testJobs (root);
     testEditor (root);
+    testSafety (root);
     if (juce::SystemStats::getEnvironmentVariable ("STEMPLAYER_PERF", {}) == "1")
         testPerf (root);
 
