@@ -308,12 +308,18 @@ def main(argv=None):
 
         peak = max(float(np.max(np.abs(s))) for s in stems)
         gain = 1.0
-        if args.bit_depth != 32 and peak > 0.999:
-            gain = 0.999 / peak
-            emit("STATUS", f"Peak {peak:.2f} > 1.0: all stems scaled by {gain:.3f} to avoid clipping")
+        bit_depth = args.bit_depth
+        if bit_depth != 32 and peak > 0.999:
+            if preserve and args.format == "wav":
+                # Float WAV can exceed 0 dBFS, so nothing is scaled or clipped and the stems still sum to the original.
+                bit_depth = 32
+                emit("STATUS", f"Peak {peak:.2f} > 1.0: writing 32-bit float stems so nothing is scaled or clipped")
+            else:
+                gain = 0.999 / peak
+                emit("STATUS", f"Peak {peak:.2f} > 1.0: all stems scaled by {gain:.3f} to avoid clipping")
 
         ext = "flac" if args.format == "flac" else "wav"
-        subtype = {16: "PCM_16", 24: "PCM_24", 32: "FLOAT"}[args.bit_depth]
+        subtype = {16: "PCM_16", 24: "PCM_24", 32: "FLOAT"}[bit_depth]
         if args.format == "flac" and subtype == "FLOAT":
             subtype = "PCM_24"
         for i, (name, s) in enumerate(zip(names, stems)):
@@ -323,7 +329,7 @@ def main(argv=None):
 
         with open(os.path.join(args.output, "stems.json"), "w", encoding="utf-8") as f:
             json.dump({"source": os.path.basename(args.input), "model": args.model,
-                       "sample_rate": sr_out, "format": ext, "bit_depth": args.bit_depth,
+                       "sample_rate": sr_out, "format": ext, "bit_depth": bit_depth,
                        "gain_applied": gain, "stems": names,
                        "format_version": 2, "preserve_mix": preserve,
                        "seconds": round(time.time() - _t0, 1)}, f, indent=2)

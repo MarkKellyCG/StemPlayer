@@ -66,5 +66,38 @@ def test_residual_makes_stems_sum_to_input():
     print("residual restores exact sum OK (error %.3g -> %.3g)" % (before, after))
 
 
+def test_loud_track_keeps_exact_sum_via_float():
+    """A track that peaks at full scale must not be scaled: stems are written as float and still sum exactly."""
+    import json, tempfile, io, contextlib
+    import soundfile as sf
+    rnd = np.random.default_rng(5)
+    sr = 44100
+    t = np.arange(sr * 3) / sr
+    x = (0.9 * np.sin(2 * np.pi * 440 * t) + 0.09 * rnd.standard_normal(len(t))).astype("float64")
+    x = np.stack([x, x * 0.9], 1)
+    x = np.clip(x, -0.9999, 0.9999)
+    assert np.max(np.abs(x)) > 0.999
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "loud.wav"); out = os.path.join(d, "out")
+        sf.write(src, x, sr, subtype="PCM_24")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = ss.main(["--input", src, "--output", out, "--model", "fake"])
+        assert rc == 0, buf.getvalue()
+        man = json.load(open(os.path.join(out, "stems.json")))
+        assert man["bit_depth"] == 32 and man["gain_applied"] == 1.0 and man["preserve_mix"] and man["format_version"] == 2, man
+        S = sum(sf.read(os.path.join(out, n + ".wav"), dtype="float64")[0] for n in ss.STEMS)
+        ref = sf.read(src, dtype="float64")[0]
+        err = float(np.max(np.abs(S - ref)))
+        assert err < 1e-5, err
+        # with --no-preserve-mix the old behaviour (scale to avoid clipping) still applies
+        out2 = os.path.join(d, "out2")
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert ss.main(["--input", src, "--output", out2, "--model", "fake", "--no-preserve-mix"]) == 0
+        man2 = json.load(open(os.path.join(out2, "stems.json")))
+        assert man2["preserve_mix"] is False and man2["format_version"] == 2
+    print("loud track: float stems, exact sum (error %.2g)" % err)
+
+
 if __name__ == "__main__":
-    test_plan_chunks(); test_crossfade_reconstructs(); test_resample_tone(); test_residual_makes_stems_sum_to_input()
+    test_plan_chunks(); test_crossfade_reconstructs(); test_resample_tone(); test_residual_makes_stems_sum_to_input(); test_loud_track_keeps_exact_sum_via_float()
