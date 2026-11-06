@@ -10,6 +10,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/StemLoader.h"
 #include "../Source/Log.h"
+#include "../Source/Settings.h"
 #include <cstdlib>
 #include <iostream>
 
@@ -654,6 +655,98 @@ static void testSafety (const juce::File& root)
     }
 }
 
+static void testOutputFolder (const juce::File& root)
+{
+    std::cout << "[output folder]\n";
+    const double sr = 44100.0;
+
+    // ---- settings file: round trip, reset, other keys preserved ----
+    {
+        auto f = stemplayer::settings::file();
+        f.getParentDirectory().createDirectory();
+        f.replaceWithText ("{ \"somethingElse\": 42 }");
+        auto dir = root.getChildFile ("chosen out");
+        stemplayer::settings::setOutputFolder (dir);
+        CHECK (stemplayer::settings::outputFolder() == dir, "output folder persists: " << stemplayer::settings::outputFolder().getFullPathName());
+        CHECK (f.loadFileAsString().contains ("somethingElse"), "unrelated settings are preserved");
+        stemplayer::settings::setOutputFolder ({});
+        CHECK (stemplayer::settings::outputFolder() == juce::File(), "reset returns to the default");
+        f.replaceWithText ("this is not json {{{");                       // corrupt file must not crash or wedge
+        CHECK (stemplayer::settings::outputFolder() == juce::File(), "corrupt settings file is treated as default");
+        stemplayer::settings::setOutputFolder (dir);
+        CHECK (stemplayer::settings::outputFolder() == dir, "a corrupt file is repaired by the next save");
+        stemplayer::settings::setOutputFolder ({});
+    }
+
+    // ---- an unusable folder is reported, not silently ignored ----
+    {
+        StemPlayerProcessor p;
+        p.setRateAndBufferSizeDetails (sr, 512); p.prepareToPlay (sr, 512);
+        auto notAFolder = root.getChildFile ("iamafile.txt");
+        notAFolder.replaceWithText ("x");
+        p.setOutputFolder (notAFolder);
+        CHECK (p.getOutputFolder() == notAFolder, "processor exposes the setting");
+        auto script = root.getChildFile ("unused_helper.sh");
+        script.replaceWithText ("#!/bin/sh\necho ERROR must-not-run\nexit 1\n", false, false, "\n");
+        script.setExecutePermission (true);
+        p.setHelperPath (script);
+        auto wav = root.getChildFile ("of_in.wav");
+        writeWav (wav, sine (440, 0.3, 44100, 1.0), nullptr, 44100);
+        p.requestSplit (wav);
+        CHECK (waitFor ([&] { return p.getStatus().state == StemPlayerProcessor::JobState::Error; }, 5000), "unwritable output folder -> Error");
+        CHECK (p.getStatus().text.contains ("Can't write to the stems folder"), "message names the problem: " << p.getStatus().text);
+        p.setOutputFolder ({});
+    }
+
+    // ---- end to end with the real helper (optional) ----
+    if (auto helperPath = juce::SystemStats::getEnvironmentVariable ("STEMPLAYER_TEST_HELPER", {}); helperPath.isNotEmpty())
+    {
+        const double r = 48000.0;
+        auto custom = root.getChildFile ("my stems folder");
+        auto dirA = root.getChildFile ("albumA"); dirA.createDirectory();
+        auto dirB = root.getChildFile ("albumB"); dirB.createDirectory();
+        auto a = dirA.getChildFile ("Track.wav"), b = dirB.getChildFile ("Track.wav");   // same file name, different songs
+        writeWav (a, sine (300.0, 0.3, r, 2.0), nullptr, r);
+        writeWav (b, sine (700.0, 0.3, r, 2.0), nullptr, r);
+
+        StemPlayerProcessor p;
+        p.setRateAndBufferSizeDetails (r, 512); p.prepareToPlay (r, 512);
+        p.setHelperPath (juce::File (helperPath));
+        p.setOutputFolder (custom);
+
+        auto splitAndWait = [&] (const juce::File& f)
+        {
+            p.requestSplit (f);
+            return waitFor ([&] { auto s = p.getStatus(); return (s.state == StemPlayerProcessor::JobState::Idle && s.text.startsWith ("Loaded"))
+                                                                  || s.state == StemPlayerProcessor::JobState::Error; }, 120000)
+                   && p.getStatus().state == StemPlayerProcessor::JobState::Idle;
+        };
+
+        CHECK (splitAndWait (a), "split A into the chosen folder: " << p.getStatus().text);
+        auto outA = custom.getChildFile ("Track_stems");
+        CHECK (outA.getChildFile ("stems.json").existsAsFile(), "A's stems are in the chosen folder");
+        CHECK (! dirA.getChildFile ("Track_stems").exists(), "nothing was written next to the song");
+        CHECK (p.getTitle() == "Track", "title " << p.getTitle());
+
+        CHECK (splitAndWait (b), "split B (same file name) into the same folder: " << p.getStatus().text);
+        int folders = 0; juce::File outB;
+        for (auto& d : custom.findChildFiles (juce::File::findDirectories, false))
+            if (d.getChildFile ("stems.json").existsAsFile()) { ++folders; if (d != outA) outB = d; }
+        CHECK (folders == 2, "two songs with the same name get two folders, found " << folders);
+        CHECK (outB.getFileName().startsWith ("Track [") && outB.getFileName().endsWith ("]_stems"), "second folder is de-duplicated: " << outB.getFileName());
+        CHECK (juce::JSON::parse (outA.getChildFile ("stems.json")).getProperty ("source_path", {}).toString() == a.getFullPathName(), "A's manifest records its source");
+        CHECK (juce::JSON::parse (outB.getChildFile ("stems.json")).getProperty ("source_path", {}).toString() == b.getFullPathName(), "B's manifest records its source");
+        CHECK (p.getTitle() == "Track", "de-duplicated folder still shows the song name: " << p.getTitle());
+
+        const auto before = outA.getChildFile ("stems.json").getLastModificationTime();
+        juce::Thread::sleep (1100);
+        CHECK (splitAndWait (a), "re-split of A");
+        CHECK (outA.getChildFile ("stems.json").getLastModificationTime() == before, "A's existing stems are reused, not re-run");
+        CHECK (custom.findChildFiles (juce::File::findDirectories, false).size() == 2, "no extra folder was created");
+        p.setOutputFolder ({});
+    }
+}
+
 static void testPerf (const juce::File& root)
 {
     std::cout << "[perf] building 6 x 4 min @44.1k stems...\n";
@@ -678,12 +771,14 @@ int main()
     root.deleteRecursively();
     root.createDirectory();
 
+    stemplayer::settings::setOutputFolder ({});                 // tests share ~/.config with real use: start from the default
     testResampler();
     testLoaderEdgeCases (root);
     testPlayback (root);
     testJobs (root);
     testEditor (root);
     testSafety (root);
+    testOutputFolder (root);
     if (juce::SystemStats::getEnvironmentVariable ("STEMPLAYER_PERF", {}) == "1")
         testPerf (root);
 

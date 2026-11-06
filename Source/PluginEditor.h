@@ -44,14 +44,16 @@ private:
     StemPlayerProcessor& proc;
     std::array<std::unique_ptr<StemStrip>, stemplayer::kNumStems> strips;
 
-    juce::Label titleLabel, statusLabel, offsetLabel, masterLabel;
+    juce::Label titleLabel, statusLabel, offsetLabel, masterLabel, outputLabel;
     juce::TextButton splitButton { "Split audio file..." }, loadButton { "Load stems folder..." },
-                     helperButton { "Helper..." }, logButton { "Log" }, cancelButton { "Cancel" };
+                     helperButton { "Helper..." }, logButton { "Log" }, cancelButton { "Cancel" },
+                     outputButton { "Output folder..." }, outputResetButton { "Reset" };
     juce::Slider offsetSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight },
                  masterSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::AudioProcessorValueTreeState::SliderAttachment offsetAtt, masterAtt;
 
-    int statsTick = 0;
+    void refreshOutputLabel();
+    int statsTick = 0, outputTick = 0;
     double progressValue = 0.0;
     juce::ProgressBar progressBar { progressValue };
 

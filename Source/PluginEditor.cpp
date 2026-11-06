@@ -85,7 +85,12 @@ StemPlayerEditor::StemPlayerEditor (StemPlayerProcessor& p)
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     addAndMakeVisible (statusLabel);
 
-    for (auto* b : { &splitButton, &loadButton, &helperButton, &logButton, &cancelButton })
+    outputLabel.setFont (juce::FontOptions (13.0f));
+    outputLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    outputLabel.setMinimumHorizontalScale (0.8f);
+    addAndMakeVisible (outputLabel);
+
+    for (auto* b : { &splitButton, &loadButton, &helperButton, &logButton, &cancelButton, &outputButton, &outputResetButton })
         addAndMakeVisible (b);
 
     addAndMakeVisible (progressBar);
@@ -154,9 +159,30 @@ StemPlayerEditor::StemPlayerEditor (StemPlayerProcessor& p)
         f.revealToUser();
     };
 
+    outputButton.setTooltip ("Choose the folder where split stems are saved (a '<song>_stems' folder is created inside it)");
+    outputButton.onClick = [this]
+    {
+        auto start = proc.getOutputFolder();
+        chooser = std::make_unique<juce::FileChooser> ("Choose the folder to save stems in", start);
+        juce::Component::SafePointer<StemPlayerEditor> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                              [safe] (const juce::FileChooser& fc)
+                              {
+                                  if (safe != nullptr && fc.getResult() != juce::File())
+                                  {
+                                      safe->proc.setOutputFolder (fc.getResult());
+                                      safe->refreshOutputLabel();
+                                  }
+                              });
+    };
+
+    outputResetButton.setTooltip ("Go back to saving stems next to each song");
+    outputResetButton.onClick = [this] { proc.setOutputFolder ({}); refreshOutputLabel(); };
+
     cancelButton.onClick = [this] { proc.cancelJob(); };
 
-    setSize (760, 470);          // last: triggers resized(), which needs every child to exist
+    refreshOutputLabel();
+    setSize (760, 500);          // last: triggers resized(), which needs every child to exist
 
     startTimerHz (30);
     timerCallback();
@@ -171,14 +197,14 @@ void StemPlayerEditor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff16181c));
     g.setColour (juce::Colour (0xff23262c));
-    g.fillRect (getLocalBounds().removeFromTop (96));
+    g.fillRect (getLocalBounds().removeFromTop (124));
 }
 
 void StemPlayerEditor::resized()
 {
     auto r = getLocalBounds().reduced (10);
 
-    auto top = r.removeFromTop (80);
+    auto top = r.removeFromTop (108);
     titleLabel.setBounds (top.removeFromTop (28));
     auto buttons = top.removeFromTop (26);
     splitButton.setBounds (buttons.removeFromLeft (150));
@@ -189,6 +215,13 @@ void StemPlayerEditor::resized()
     buttons.removeFromLeft (6);
     logButton.setBounds (buttons.removeFromLeft (50));
     cancelButton.setBounds (buttons.removeFromRight (80));
+    top.removeFromTop (4);
+    auto outputRow = top.removeFromTop (24);
+    outputResetButton.setBounds (outputRow.removeFromRight (55));
+    outputRow.removeFromRight (6);
+    outputButton.setBounds (outputRow.removeFromRight (125));
+    outputRow.removeFromRight (6);
+    outputLabel.setBounds (outputRow);
     top.removeFromTop (4);
     auto statusRow = top;
     progressBar.setBounds (statusRow.removeFromRight (200));
@@ -211,8 +244,23 @@ void StemPlayerEditor::resized()
             strips[(size_t) i]->setBounds (r.removeFromLeft (w));
 }
 
+void StemPlayerEditor::refreshOutputLabel()
+{
+    const auto f = proc.getOutputFolder();
+    outputLabel.setText (f == juce::File() ? juce::String ("Stems are saved next to each song (or in %APPDATA%\\StemPlayer\\stems if that folder isn't writable)")
+                                           : "Stems are saved in: " + f.getFullPathName(),
+                         juce::dontSendNotification);
+    outputResetButton.setEnabled (f != juce::File());
+}
+
 void StemPlayerEditor::timerCallback()
 {
+    if (++outputTick >= 30)                 // ~1 Hz: another instance/host may have changed the shared setting
+    {
+        outputTick = 0;
+        refreshOutputLabel();
+    }
+
     if (++statsTick >= 30 * 15)             // every ~15 s while the window is open
     {
         statsTick = 0;

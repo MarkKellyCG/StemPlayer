@@ -190,6 +190,13 @@ namespace stemplayer
             auto name = folder.getFileName();
             if (name.endsWithIgnoreCase ("_stems"))
                 name = name.dropLastCharacters (6);
+
+            // Prefer the real song name recorded by the helper (the folder name may carry a de-duplication suffix).
+            const auto manifest = juce::JSON::parse (folder.getChildFile ("stems.json"));
+            const auto source = manifest.getProperty ("source", {}).toString();
+            if (source.isNotEmpty())
+                name = juce::File (source).getFileNameWithoutExtension();
+
             set->title = name;
         }
 

@@ -4,6 +4,7 @@
 #include "HelperRunner.h"
 #include "StemLoader.h"
 #include "Log.h"
+#include "Settings.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 
 using namespace stemplayer;
@@ -24,16 +25,42 @@ namespace
         std::atomic<juce::uint32>& count;
     };
 
-    juce::File chooseOutputDir (const juce::File& audio)
+    /** Where the stems for `audio` go.  `customRoot` (File() = default) is the user's chosen output folder; otherwise
+        next to the song, falling back to %APPDATA%\StemPlayer\stems.  A song never shares a folder with a different
+        song that has the same file name: the second one gets an "[xxxxxxxx]" suffix.  On failure `problem` explains why. */
+    juce::File chooseOutputDir (const juce::File& audio, const juce::File& customRoot, juce::String& problem)
     {
-        const auto name = audio.getFileNameWithoutExtension() + "_stems";
-        auto beside = audio.getParentDirectory().getChildFile (name);
+        const auto base = audio.getFileNameWithoutExtension();
 
-        if (beside.isDirectory() || beside.createDirectory().wasOk())
-            if (beside.hasWriteAccess())
-                return beside;
+        auto folderIn = [&] (const juce::File& root)
+        {
+            auto dir = root.getChildFile (base + "_stems");
+            const auto sourcePath = juce::JSON::parse (dir.getChildFile ("stems.json")).getProperty ("source_path", {}).toString();
+            if (sourcePath.isNotEmpty() && juce::File (sourcePath) != audio)
+                dir = root.getChildFile (base + " [" + juce::String::toHexString (audio.getFullPathName().hashCode()).paddedLeft ('0', 8) + "]_stems");
+            return dir;
+        };
 
-        return helper::defaultHelperDirectory().getChildFile ("stems").getChildFile (name);
+        auto usable = [] (const juce::File& root)
+        {
+            return (root.isDirectory() || root.createDirectory().wasOk()) && root.hasWriteAccess();
+        };
+
+        if (customRoot != juce::File())
+        {
+            if (! usable (customRoot))
+            {
+                problem = "Can't write to the stems folder " + customRoot.getFullPathName()
+                        + ". Pick another one with 'Output folder...' (or Reset to use the default).";
+                return {};
+            }
+            return folderIn (customRoot);
+        }
+
+        if (usable (audio.getParentDirectory()))
+            return folderIn (audio.getParentDirectory());
+
+        return folderIn (helper::defaultHelperDirectory().getChildFile ("stems"));
     }
 
     /** Reusable only if the stems are newer than the source AND were written by a helper that keeps the
@@ -374,6 +401,17 @@ juce::String StemPlayerProcessor::getTitle() const
     return title;
 }
 
+juce::File StemPlayerProcessor::getOutputFolder() const
+{
+    return stemplayer::settings::outputFolder();
+}
+
+void StemPlayerProcessor::setOutputFolder (const juce::File& f)
+{
+    stemplayer::log::write ("output folder set to " + (f == juce::File() ? juce::String ("(default)") : f.getFullPathName()));
+    stemplayer::settings::setOutputFolder (f);
+}
+
 juce::File StemPlayerProcessor::getHelperPath() const
 {
     const juce::ScopedLock sl (statusLock);
@@ -538,7 +576,16 @@ void StemPlayerProcessor::runSplit (juce::Thread& t, juce::File audio)
         }
     }
 
-    const auto outDir = chooseOutputDir (audio);
+    juce::String problem;
+    const auto outDir = chooseOutputDir (audio, getOutputFolder(), problem);
+    if (problem.isNotEmpty())
+    {
+        stemplayer::log::write ("split refused: " + problem);
+        setJobStatus (JobState::Error, 0.0f, problem);
+        return;
+    }
+    stemplayer::log::write ("stems for " + audio.getFileName() + " go to " + outDir.getFullPathName()
+                            + (getOutputFolder() == juce::File() ? " (default location)" : " (chosen output folder)"));
 
     if (! hasCompleteStems (outDir, audio))
     {

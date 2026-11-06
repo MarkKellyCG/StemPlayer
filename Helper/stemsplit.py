@@ -328,7 +328,7 @@ def main(argv=None):
             emit("PROGRESS", f"{0.90 + 0.09 * (i + 1) / len(names):.4f}")
 
         with open(os.path.join(args.output, "stems.json"), "w", encoding="utf-8") as f:
-            json.dump({"source": os.path.basename(args.input), "model": args.model,
+            json.dump({"source": os.path.basename(args.input), "source_path": os.path.abspath(args.input), "model": args.model,
                        "sample_rate": sr_out, "format": ext, "bit_depth": bit_depth,
                        "gain_applied": gain, "stems": names,
                        "format_version": 2, "preserve_mix": preserve,

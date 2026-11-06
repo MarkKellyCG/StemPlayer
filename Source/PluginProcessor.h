@@ -60,6 +60,11 @@ public:
     juce::File getHelperPath() const;
     void setHelperPath (const juce::File&);
 
+    /** Folder that split stems are written to (shared across instances/hosts via settings.json).
+        File() = next to the song (falls back to %APPDATA%\StemPlayer\stems if that isn't writable). */
+    juce::File getOutputFolder() const;
+    void setOutputFolder (const juce::File&);
+
     float getMeter (int stem) const { return meters[(size_t) stem].load(); }
 
     /** Writes the audio-thread counters (blocks, seeks, ...) to the log. Message thread only. */

@@ -31,7 +31,8 @@ set(STEMPLAYER_SOURCES
     Source/PluginEditor.cpp
     Source/StemLoader.cpp
     Source/HelperRunner.cpp
-    Source/Log.cpp)
+    Source/Log.cpp
+    Source/Settings.cpp)
 
 set(STEMPLAYER_DEFS
     JUCE_WEB_BROWSER=0
